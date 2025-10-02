@@ -360,6 +360,7 @@ impl PDRouter {
                 error_stream,
                 status,
                 None,
+                None,
                 context.return_logprob,
                 Some(decode_url),
                 Some(response_headers),
@@ -474,16 +475,34 @@ impl PDRouter {
 
                 if context.is_stream {
                     // Streaming response
-                    let prefill_logprobs = if context.return_logprob {
-                        prefill_body
-                            .as_ref()
-                            .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-                            .and_then(|json| {
-                                json.pointer("/meta_info/input_token_logprobs").cloned()
-                            })
-                    } else {
-                        None
-                    };
+                    let (prefill_logprobs, prompt_tokens_details) =
+                        if let Some(body) = prefill_body.as_ref() {
+                            match serde_json::from_slice::<Value>(body) {
+                                Ok(prefill_json) => {
+                                    let logprobs = if context.return_logprob {
+                                        prefill_json
+                                            .pointer("/meta_info/input_token_logprobs")
+                                            .cloned()
+                                    } else {
+                                        None
+                                    };
+                                    let details = prefill_json
+                                        .get("usage")
+                                        .and_then(|usage| usage.get("prompt_tokens_details"))
+                                        .cloned();
+                                    (logprobs, details)
+                                }
+                                Err(e) => {
+                                    warn!(
+                                    "Failed to parse prefill response for streaming metadata: {}",
+                                    e
+                                );
+                                    (None, None)
+                                }
+                            }
+                        } else {
+                            (None, None)
+                        };
 
                     let response_headers = header_utils::preserve_response_headers(res.headers());
 
@@ -491,6 +510,7 @@ impl PDRouter {
                         res.bytes_stream(),
                         status,
                         prefill_logprobs,
+                        prompt_tokens_details,
                         context.return_logprob,
                         None,
                         Some(response_headers),
@@ -498,35 +518,13 @@ impl PDRouter {
                         decode,
                     )
                 } else {
-                    // Non-streaming response
-                    if context.return_logprob {
-                        self.process_non_streaming_response(
-                            res,
-                            status,
-                            context.return_logprob,
-                            prefill_body,
-                        )
-                        .await
-                    } else {
-                        // Direct passthrough when no logprobs needed
-                        let response_headers =
-                            header_utils::preserve_response_headers(res.headers());
-
-                        match res.bytes().await {
-                            Ok(decode_body) => {
-                                let mut response =
-                                    Response::new(axum::body::Body::from(decode_body));
-                                *response.status_mut() = status;
-                                *response.headers_mut() = response_headers;
-                                response
-                            }
-                            Err(e) => {
-                                error!("Failed to read decode response: {}", e);
-                                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read response")
-                                    .into_response()
-                            }
-                        }
-                    }
+                    self.process_non_streaming_response(
+                        res,
+                        status,
+                        context.return_logprob,
+                        prefill_body,
+                    )
+                    .await
                 }
             }
             Err(e) => {
@@ -648,6 +646,7 @@ impl PDRouter {
         stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
         status: StatusCode,
         prefill_logprobs: Option<Value>,
+        prompt_tokens_details: Option<Value>,
         return_logprob: bool,
         decode_url: Option<String>,
         headers: Option<HeaderMap>,
@@ -676,9 +675,16 @@ impl PDRouter {
                             .windows(12)
                             .any(|window| window == b"data: [DONE]");
 
-                        let result = if return_logprob && prefill_logprobs.is_some() {
-                            Self::merge_streaming_logprobs(prefill_logprobs.clone(), &chunk)
-                                .unwrap_or(chunk)
+                        let should_merge = (return_logprob && prefill_logprobs.is_some())
+                            || prompt_tokens_details.is_some();
+
+                        let result = if should_merge {
+                            Self::merge_streaming_logprobs(
+                                prefill_logprobs.clone(),
+                                prompt_tokens_details.clone(),
+                                &chunk,
+                            )
+                            .unwrap_or(chunk)
                         } else {
                             chunk
                         };
@@ -741,6 +747,7 @@ impl PDRouter {
         return_logprob: bool,
         prefill_body: Option<bytes::Bytes>,
     ) -> Response {
+        let response_headers = header_utils::preserve_response_headers(res.headers());
         let response = res.bytes().await;
         let decode_body = match response {
             Ok(decode_body) => decode_body,
@@ -751,32 +758,80 @@ impl PDRouter {
             }
         };
 
+        let prefill_json = prefill_body
+            .as_ref()
+            .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+
         if !return_logprob {
-            return (status, decode_body).into_response();
+            if let (Some(prefill_json), Ok(mut decode_json)) = (
+                prefill_json.as_ref(),
+                serde_json::from_slice::<Value>(&decode_body),
+            ) {
+                if Self::merge_prompt_tokens_details(prefill_json, &mut decode_json) {
+                    return match serde_json::to_vec(&decode_json) {
+                        Ok(body) => {
+                            let mut response = Response::new(axum::body::Body::from(body));
+                            *response.status_mut() = status;
+                            *response.headers_mut() = response_headers.clone();
+                            response
+                        }
+                        Err(e) => {
+                            error!("Failed to serialize merged response: {}", e);
+                            let mut response =
+                                Response::new(axum::body::Body::from(decode_body.clone()));
+                            *response.status_mut() = status;
+                            *response.headers_mut() = response_headers.clone();
+                            response
+                        }
+                    };
+                }
+            }
+
+            let mut response = Response::new(axum::body::Body::from(decode_body));
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+            return response;
         }
 
-        let Some(prefill_body) = prefill_body else {
-            return (status, decode_body).into_response();
+        let Some(prefill_json) = prefill_json.as_ref() else {
+            warn!("Prefill response missing body for logprob merging");
+            let mut response = Response::new(axum::body::Body::from(decode_body));
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+            return response;
         };
 
-        // Merge logprobs from prefill and decode
-        let (Ok(prefill_json), Ok(mut decode_json)) = (
-            serde_json::from_slice::<Value>(&prefill_body),
-            serde_json::from_slice::<Value>(&decode_body),
-        ) else {
-            warn!("Failed to parse responses for logprob merging");
-            return (status, decode_body).into_response();
+        let Ok(mut decode_json) = serde_json::from_slice::<Value>(&decode_body) else {
+            warn!("Failed to parse decode response for logprob merging");
+            let mut response = Response::new(axum::body::Body::from(decode_body));
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+            return response;
         };
 
-        Self::merge_logprobs_in_json(&prefill_json, &mut decode_json);
+        let merged = Self::merge_logprobs_in_json(prefill_json, &mut decode_json);
 
-        // Return merged response
-        match serde_json::to_vec(&decode_json) {
-            Ok(body) => (status, body).into_response(),
-            Err(e) => {
-                error!("Failed to serialize merged response: {}", e);
-                (status, decode_body).into_response()
+        if merged {
+            match serde_json::to_vec(&decode_json) {
+                Ok(body) => {
+                    let mut response = Response::new(axum::body::Body::from(body));
+                    *response.status_mut() = status;
+                    *response.headers_mut() = response_headers;
+                    response
+                }
+                Err(e) => {
+                    error!("Failed to serialize merged response: {}", e);
+                    let mut response = Response::new(axum::body::Body::from(decode_body));
+                    *response.status_mut() = status;
+                    *response.headers_mut() = response_headers;
+                    response
+                }
             }
+        } else {
+            let mut response = Response::new(axum::body::Body::from(decode_body));
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+            response
         }
     }
 
@@ -835,23 +890,22 @@ impl PDRouter {
                 .into_response());
         }
 
-        // Read prefill body if needed for logprob merging
-        let prefill_body = if return_logprob {
-            match prefill_response.bytes().await {
-                Ok(body) => Some(body),
-                Err(e) => {
-                    warn!("Failed to read prefill response body for logprobs: {}", e);
-                    None
+        // Read prefill body for downstream metadata merging/logprob handling
+        let prefill_body = match prefill_response.bytes().await {
+            Ok(body) => {
+                if !return_logprob {
+                    debug!("Prefill response consumed successfully (non-logprob request)");
                 }
+                Some(body)
             }
-        } else {
-            // For non-logprob requests, just consume the response without storing
-            debug!("Consuming prefill response body (non-logprob request)");
-            match prefill_response.bytes().await {
-                Ok(_) => debug!("Prefill response consumed successfully"),
-                Err(e) => warn!("Error consuming prefill response: {}", e),
+            Err(e) => {
+                warn!(
+                    "Failed to read prefill response body{}: {}",
+                    if return_logprob { " for logprobs" } else { "" },
+                    e
+                );
+                None
             }
-            None
         };
 
         Ok((prefill_status, prefill_body))
@@ -904,16 +958,52 @@ impl PDRouter {
                     let mut merged = prefill_arr.clone();
                     merged.extend(decode_arr.clone());
                     decode_meta["input_token_logprobs"] = Value::Array(merged);
+                    let _ = Self::merge_prompt_tokens_details(prefill_json, decode_json);
                     return true;
                 }
             }
         }
-        false
+        Self::merge_prompt_tokens_details(prefill_json, decode_json)
+    }
+
+    fn merge_prompt_tokens_details(prefill_json: &Value, decode_json: &mut Value) -> bool {
+        let Some(prefill_usage) = prefill_json.get("usage") else {
+            return false;
+        };
+        let Some(details) = prefill_usage.get("prompt_tokens_details").cloned() else {
+            return false;
+        };
+
+        if details.is_null() {
+            return false;
+        }
+
+        match decode_json.get_mut("usage") {
+            Some(Value::Object(usage_map)) => match usage_map.get("prompt_tokens_details") {
+                Some(existing) if !existing.is_null() => false,
+                _ => {
+                    usage_map.insert("prompt_tokens_details".to_string(), details);
+                    true
+                }
+            },
+            Some(_) => false,
+            None => {
+                if let Some(obj) = decode_json.as_object_mut() {
+                    let mut usage_map = serde_json::Map::new();
+                    usage_map.insert("prompt_tokens_details".to_string(), details);
+                    obj.insert("usage".to_string(), Value::Object(usage_map));
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     // Simple helper to merge logprobs in streaming responses
     fn merge_streaming_logprobs(
         prefill_logprobs: Option<Value>,
+        prompt_tokens_details: Option<Value>,
         decode_chunk: &[u8],
     ) -> Result<bytes::Bytes, ()> {
         // Skip non-data chunks
@@ -936,6 +1026,21 @@ impl PDRouter {
                         let mut merged = p_arr.clone();
                         merged.extend(d_arr.clone());
                         *d_logprobs = Value::Array(merged);
+                    }
+                }
+            }
+        }
+
+        if let Some(details) = prompt_tokens_details {
+            if let Some(usage) = decode_json.get_mut("usage") {
+                if let Some(usage_obj) = usage.as_object_mut() {
+                    let has_details = usage_obj
+                        .get("prompt_tokens_details")
+                        .map(|existing| !existing.is_null())
+                        .unwrap_or(false);
+
+                    if !has_details {
+                        usage_obj.insert("prompt_tokens_details".to_string(), details);
                     }
                 }
             }
@@ -1249,6 +1354,7 @@ impl RouterTrait for PDRouter {
 mod tests {
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
+    use serde_json::json;
 
     fn create_test_pd_router() -> PDRouter {
         let worker_registry = Arc::new(WorkerRegistry::new());
@@ -1377,6 +1483,7 @@ mod tests {
             stream.map(Ok),
             StatusCode::OK,
             None,
+            None,
             false,
             None,
             None,
@@ -1400,5 +1507,46 @@ mod tests {
 
         assert_eq!(prefill_ref.load(), 0);
         assert_eq!(decode_ref.load(), 0);
+    }
+
+    #[test]
+    fn test_merge_logprobs_propagates_prompt_cache_usage_details() {
+        let prefill_json = json!({
+            "meta_info": {
+                "input_token_logprobs": [0.1, 0.2]
+            },
+            "usage": {
+                "prompt_tokens": 16,
+                "completion_tokens": 0,
+                "total_tokens": 16,
+                "prompt_tokens_details": {
+                    "cached_tokens": 8
+                }
+            }
+        });
+
+        let mut decode_json = json!({
+            "meta_info": {
+                "input_token_logprobs": [0.3, 0.4]
+            },
+            "usage": {
+                "prompt_tokens": 16,
+                "completion_tokens": 4,
+                "total_tokens": 20
+            }
+        });
+
+        let merged = PDRouter::merge_logprobs_in_json(&prefill_json, &mut decode_json);
+        assert!(merged, "metadata should be merged for prepared fixtures");
+
+        let cached_tokens = decode_json
+            .get("usage")
+            .and_then(|usage| usage.get("prompt_tokens_details"))
+            .and_then(|details| details.get("cached_tokens"));
+
+        assert!(
+            cached_tokens.is_some(),
+            "cached_tokens should be propagated from prefill usage details"
+        );
     }
 }
