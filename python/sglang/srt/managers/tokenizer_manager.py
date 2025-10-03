@@ -705,7 +705,18 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             sampling_kwargs = {**self.preferred_sampling_params, **obj.sampling_params}
         else:
             sampling_kwargs = obj.sampling_params
+        if (
+            self.server_args.tool_call_parser == "gpt-oss"
+            and sampling_kwargs.get("ignore_eos") is None
+        ):
+            sampling_kwargs = {**sampling_kwargs, "ignore_eos": True}
         sampling_params = SamplingParams(**sampling_kwargs)
+        if self.server_args.tool_call_parser == "gpt-oss":
+            sampling_params.ignore_eos = True
+            if self.tokenizer is not None and hasattr(self.tokenizer, "eos_token_id"):
+                stop_ids = sampling_params.stop_token_ids or set()
+                stop_ids.add(self.tokenizer.eos_token_id)
+                sampling_params.stop_token_ids = stop_ids
         sampling_params.normalize(self.tokenizer)
         sampling_params.verify(self.model_config.vocab_size)
 
