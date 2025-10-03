@@ -48,6 +48,7 @@ suites = {
         TestFile("openai_server/features/test_openai_server_ebnf.py", 95),
         TestFile("openai_server/features/test_openai_server_hidden_states.py", 240),
         TestFile("openai_server/features/test_reasoning_content.py", 89),
+        TestFile("openai_server/features/test_responses_system_role.py", 5),
         TestFile("openai_server/function_call/test_openai_function_calling.py", 60),
         TestFile("openai_server/function_call/test_tool_choice.py", 226),
         TestFile("openai_server/validation/test_large_max_new_tokens.py", 41),

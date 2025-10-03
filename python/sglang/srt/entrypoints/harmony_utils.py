@@ -128,18 +128,10 @@ def parse_response_input(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        if role == "system":
-            # User is trying to set a system message. Change it to:
-            # <|start|>developer<|message|># Instructions
-            # {instructions}<|end|>
-            role = "developer"
-            text_prefix = "Instructions:\n"
-        else:
-            text_prefix = ""
         if isinstance(content, str):
-            msg = Message.from_role_and_content(role, text_prefix + content)
+            msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            contents = [TextContent(text=c["text"]) for c in content]
             msg = Message.from_role_and_contents(role, contents)
     elif response_msg["type"] == "function_call_output":
         call_id = response_msg["call_id"]
