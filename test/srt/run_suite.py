@@ -14,6 +14,7 @@ class TestFile:
 suites = {
     "per-commit": [
         TestFile("function_call/test_json_schema_constraint.py", 30),
+        TestFile("function_call/test_gpt_oss_detector.py", 10),
         TestFile("hicache/test_hicache.py", 116),
         TestFile("hicache/test_hicache_mla.py", 127),
         TestFile("hicache/test_hicache_storage.py", 127),
