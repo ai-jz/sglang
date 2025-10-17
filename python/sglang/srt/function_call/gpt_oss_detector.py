@@ -69,6 +69,25 @@ class GptOssDetector(BaseFormatDetector):
                 normal_parts.append(event.content)
             # Ignore reasoning events in function call context
 
+        if calls:
+            checked_names = set()
+            filtered_calls: list[ToolCallItem] = []
+            for call in calls:
+                name = call.name
+                if name in checked_names:
+                    continue
+                filtered_calls.append(
+                    ToolCallItem(
+                        tool_index=len(filtered_calls),
+                        name=name,
+                        parameters=call.parameters,
+                    )
+                )
+                checked_names.add(name)
+                if len(checked_names) >= len(tools):
+                    break
+            calls = filtered_calls
+
         normal_text = " ".join(normal_parts).strip()
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
@@ -190,6 +209,25 @@ class GptOssDetector(BaseFormatDetector):
 
         # Clear buffer since HarmonyParser handles buffering
         self._buffer = ""
+
+        if calls:
+            checked_names = set()
+            filtered_calls: list[ToolCallItem] = []
+            for call in calls:
+                name = call.name
+                if name in checked_names:
+                    continue
+                filtered_calls.append(
+                    ToolCallItem(
+                        tool_index=len(filtered_calls),
+                        name=name,
+                        parameters=call.parameters,
+                    )
+                )
+                checked_names.add(name)
+                if len(checked_names) >= len(tools):
+                    break
+            calls = filtered_calls
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
