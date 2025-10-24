@@ -208,7 +208,20 @@ def render_for_completion(messages: list[Message]) -> list[int]:
 
 
 def get_stop_tokens_for_assistant_actions() -> list[int]:
-    return get_encoding().stop_tokens_for_assistant_actions()
+    encoding = get_encoding()
+    stop_tokens = list(encoding.stop_tokens_for_assistant_actions())
+
+    # Allow models to emit multiple tool call segments by excluding the
+    # <|call|> token from the stop set. Keeping it as a stop token causes
+    # generation to terminate after the first tool call, which prevents
+    # multi-tool workflows (see sglang issue #10089).
+    call_token_id = getattr(encoding, "special_token_to_id", {}).get("<|call|>")
+    if call_token_id is None:
+        call_token_id = getattr(encoding, "special_tokens", {}).get("<|call|>")
+    if call_token_id is not None:
+        stop_tokens = [token for token in stop_tokens if token != call_token_id]
+
+    return stop_tokens
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:
