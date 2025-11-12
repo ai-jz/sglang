@@ -697,6 +697,7 @@ class FlashInferAttnBackend(AttentionBackend):
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache=True,
+        sinks: Optional[torch.Tensor] = None,
     ):
         prefill_wrapper_paged = self.forward_metadata.prefill_wrappers[
             self._get_wrapper_idx(layer)
@@ -710,6 +711,8 @@ class FlashInferAttnBackend(AttentionBackend):
         logits_soft_cap = layer.logit_cap
 
         q = q.contiguous()
+        sinks = sinks if sinks is None else sinks.to(device=q.device)
+
         if not self.forward_metadata.use_ragged:
             if k is not None:
                 assert v is not None
@@ -718,30 +721,50 @@ class FlashInferAttnBackend(AttentionBackend):
                         layer, cache_loc, k, v, layer.k_scale, layer.v_scale
                     )
 
-            o = prefill_wrapper_paged.forward(
-                q.view(-1, layer.tp_q_head_num, layer.head_dim),
-                forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id),
-                causal=not layer.is_cross_attention,
-                sm_scale=layer.scaling,
-                # Disable sliding window attention for multi-item scoring:
-                # - Sliding window could cut across item boundaries, breaking semantic coherence
-                # - Multi-item sequences need full attention to properly handle delimiter tokens
-                # - Specialized multi-item parameters (prefix_len_ptr, token_pos_in_items_ptr)
-                #   provide more precise attention control than simple sliding windows
-                # - Item-aware masking takes precedence over window-based masking
-                window_left=(
-                    layer.sliding_window_size
-                    if not (
-                        self.forward_metadata.multi_item_params
-                        and self.forward_metadata.multi_item_params.is_enabled()
-                    )
-                    else -1
-                ),
-                logits_soft_cap=logits_soft_cap,
-                # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
-                k_scale=layer.k_scale_float,
-                v_scale=layer.v_scale_float,
+            q_reshaped = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+            kv_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+
+            multi_item_params = getattr(
+                self.forward_metadata, "multi_item_params", None
             )
+            window_left = (
+                layer.sliding_window_size
+                if not (
+                    multi_item_params is not None and multi_item_params.is_enabled()
+                )
+                else -1
+            )
+
+            if sinks is None:
+                o = prefill_wrapper_paged.forward(
+                    q_reshaped,
+                    kv_buffer,
+                    causal=not layer.is_cross_attention,
+                    sm_scale=layer.scaling,
+                    # Disable sliding window attention for multi-item scoring:
+                    # - Sliding window could cut across item boundaries, breaking semantic coherence
+                    # - Multi-item sequences need full attention to properly handle delimiter tokens
+                    # - Specialized multi-item parameters (prefix_len_ptr, token_pos_in_items_ptr)
+                    #   provide more precise attention control than simple sliding windows
+                    # - Item-aware masking takes precedence over window-based masking
+                    window_left=window_left,
+                    logits_soft_cap=logits_soft_cap,
+                    # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
+                    k_scale=layer.k_scale_float,
+                    v_scale=layer.v_scale_float,
+                )
+            else:
+                o, lse = prefill_wrapper_paged.forward_return_lse(
+                    q_reshaped,
+                    kv_buffer,
+                    causal=not layer.is_cross_attention,
+                    sm_scale=layer.scaling,
+                    window_left=window_left,
+                    logits_soft_cap=logits_soft_cap,
+                    k_scale=layer.k_scale_float,
+                    v_scale=layer.v_scale_float,
+                )
+                o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
         else:
             causal = True
             if (
@@ -756,33 +779,54 @@ class FlashInferAttnBackend(AttentionBackend):
                 # NOTE: FlashInfer currently has limitations with head_dim = 32 or other dimensions
                 # The FlashInfer head_dim limitation itself is tracked here:
                 # https://github.com/flashinfer-ai/flashinfer/issues/1048
-                o = self.prefill_wrapper_ragged.forward(
-                    q.view(-1, layer.tp_q_head_num, layer.head_dim),
-                    k.view(-1, layer.tp_k_head_num, layer.head_dim),
-                    v.view(-1, layer.tp_v_head_num, layer.head_dim),
-                    causal=causal,
-                    sm_scale=layer.scaling,
-                    logits_soft_cap=logits_soft_cap,
-                )
+                q_reshaped = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+                k_reshaped = k.view(-1, layer.tp_k_head_num, layer.head_dim)
+                v_reshaped = v.view(-1, layer.tp_v_head_num, layer.head_dim)
+
+                if sinks is None:
+                    o = self.prefill_wrapper_ragged.forward(
+                        q_reshaped,
+                        k_reshaped,
+                        v_reshaped,
+                        causal=causal,
+                        sm_scale=layer.scaling,
+                        logits_soft_cap=logits_soft_cap,
+                    )
+                else:
+                    o, lse = self.prefill_wrapper_ragged.forward_return_lse(
+                        q_reshaped,
+                        k_reshaped,
+                        v_reshaped,
+                        causal=causal,
+                        sm_scale=layer.scaling,
+                        logits_soft_cap=logits_soft_cap,
+                    )
+                    o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
 
             else:
+                q_reshaped = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+                k_reshaped = k.view(-1, layer.tp_k_head_num, layer.head_dim)
+                v_reshaped = v.view(-1, layer.tp_v_head_num, layer.head_dim)
+
                 o1, s1 = self.prefill_wrapper_ragged.forward_return_lse(
-                    q.view(-1, layer.tp_q_head_num, layer.head_dim),
-                    k.view(-1, layer.tp_k_head_num, layer.head_dim),
-                    v.view(-1, layer.tp_v_head_num, layer.head_dim),
+                    q_reshaped,
+                    k_reshaped,
+                    v_reshaped,
                     causal=True,
                     sm_scale=layer.scaling,
                     logits_soft_cap=logits_soft_cap,
                 )
                 o2, s2 = prefill_wrapper_paged.forward_return_lse(
-                    q.view(-1, layer.tp_q_head_num, layer.head_dim),
+                    q_reshaped,
                     forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id),
                     causal=False,
                     sm_scale=layer.scaling,
                     logits_soft_cap=logits_soft_cap,
                 )
 
-                o, _ = merge_state(o1, s1, o2, s2)
+                o, lse = merge_state(o1, s1, o2, s2)
+                if sinks is not None:
+                    o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
 
             if save_kv_cache:
                 forward_batch.token_to_kv_pool.set_kv_buffer(
@@ -790,6 +834,39 @@ class FlashInferAttnBackend(AttentionBackend):
                 )
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
+
+    def _apply_sinks_scaling(
+        self,
+        output: torch.Tensor,
+        lse: torch.Tensor,
+        sinks: Optional[torch.Tensor],
+        num_heads: int,
+    ) -> torch.Tensor:
+        if sinks is None or output.numel() == 0:
+            return output
+
+        original_shape = output.shape
+        if output.dim() == 2:
+            head_dim = original_shape[1] // num_heads
+            output_3d = output.view(-1, num_heads, head_dim)
+        else:
+            head_dim = output.shape[2]
+            output_3d = output.view(-1, num_heads, head_dim)
+
+        lse = lse.to(torch.float32).view(-1, num_heads)
+        sinks_fp32 = sinks.to(device=output_3d.device, dtype=torch.float32)
+        if sinks_fp32.dim() == 1:
+            sinks_fp32 = sinks_fp32.view(1, -1)
+        sinks_fp32 = sinks_fp32.expand_as(lse)
+
+        scale = torch.exp(lse - torch.logaddexp(lse, sinks_fp32)).to(
+            dtype=output_3d.dtype
+        )
+        output_3d = output_3d * scale.unsqueeze(-1)
+
+        if len(original_shape) == 2:
+            return output_3d.view(original_shape)
+        return output_3d
 
     def forward_decode(
         self,
@@ -799,6 +876,7 @@ class FlashInferAttnBackend(AttentionBackend):
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache=True,
+        sinks: Optional[torch.Tensor] = None,
     ):
         decode_wrapper = self.forward_metadata.decode_wrappers[
             self._get_wrapper_idx(layer)
@@ -809,6 +887,9 @@ class FlashInferAttnBackend(AttentionBackend):
             else forward_batch.encoder_out_cache_loc
         )
 
+        if sinks is not None:
+            sinks = sinks.to(device=q.device)
+
         if k is not None:
             assert v is not None
             if save_kv_cache:
@@ -816,16 +897,30 @@ class FlashInferAttnBackend(AttentionBackend):
                     layer, cache_loc, k, v, layer.k_scale, layer.v_scale
                 )
 
-        # Call the wrapped function
-        o = decode_wrapper.forward(
-            q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
-            forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id),
-            sm_scale=layer.scaling,
-            logits_soft_cap=layer.logit_cap,
-            # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
-            k_scale=layer.k_scale_float,
-            v_scale=layer.v_scale_float,
-        )
+        q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+        kv_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+
+        if sinks is None:
+            # Call the wrapped function
+            o = decode_wrapper.forward(
+                q_reshaped,
+                kv_buffer,
+                sm_scale=layer.scaling,
+                logits_soft_cap=layer.logit_cap,
+                # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
+            )
+        else:
+            o, lse = decode_wrapper.forward_return_lse(
+                q_reshaped,
+                kv_buffer,
+                sm_scale=layer.scaling,
+                logits_soft_cap=layer.logit_cap,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
+            )
+            o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
 
