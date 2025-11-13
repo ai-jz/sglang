@@ -735,36 +735,23 @@ class FlashInferAttnBackend(AttentionBackend):
                 else -1
             )
 
-            if sinks is None:
-                o = prefill_wrapper_paged.forward(
-                    q_reshaped,
-                    kv_buffer,
-                    causal=not layer.is_cross_attention,
-                    sm_scale=layer.scaling,
-                    # Disable sliding window attention for multi-item scoring:
-                    # - Sliding window could cut across item boundaries, breaking semantic coherence
-                    # - Multi-item sequences need full attention to properly handle delimiter tokens
-                    # - Specialized multi-item parameters (prefix_len_ptr, token_pos_in_items_ptr)
-                    #   provide more precise attention control than simple sliding windows
-                    # - Item-aware masking takes precedence over window-based masking
-                    window_left=window_left,
-                    logits_soft_cap=logits_soft_cap,
-                    # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
-                    k_scale=layer.k_scale_float,
-                    v_scale=layer.v_scale_float,
-                )
-            else:
-                o, lse = prefill_wrapper_paged.forward_return_lse(
-                    q_reshaped,
-                    kv_buffer,
-                    causal=not layer.is_cross_attention,
-                    sm_scale=layer.scaling,
-                    window_left=window_left,
-                    logits_soft_cap=logits_soft_cap,
-                    k_scale=layer.k_scale_float,
-                    v_scale=layer.v_scale_float,
-                )
-                o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
+            prefill_wrapper_paged._causal = not layer.is_cross_attention
+            prefill_wrapper_paged._pos_encoding_mode = "NONE"
+            prefill_wrapper_paged._use_fp16_qk_reduction = False
+            prefill_wrapper_paged._window_left = window_left
+            prefill_wrapper_paged._logits_soft_cap = logits_soft_cap
+            prefill_wrapper_paged._sm_scale = layer.scaling
+            prefill_wrapper_paged._rope_scale = None
+            prefill_wrapper_paged._rope_theta = None
+
+            o = prefill_wrapper_paged.run(
+                q_reshaped,
+                kv_buffer,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
+                window_left=window_left,
+                sinks=sinks,
+            )
         else:
             causal = True
             if (
@@ -900,18 +887,7 @@ class FlashInferAttnBackend(AttentionBackend):
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
         kv_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
 
-        if sinks is None:
-            # Call the wrapped function
-            o = decode_wrapper.forward(
-                q_reshaped,
-                kv_buffer,
-                sm_scale=layer.scaling,
-                logits_soft_cap=layer.logit_cap,
-                # Must use _float to avoid device-to-host copy that breaks cuda graph capture.
-                k_scale=layer.k_scale_float,
-                v_scale=layer.v_scale_float,
-            )
-        else:
+        if sinks is not None and not decode_wrapper.use_tensor_cores:
             o, lse = decode_wrapper.forward_return_lse(
                 q_reshaped,
                 kv_buffer,
@@ -921,6 +897,22 @@ class FlashInferAttnBackend(AttentionBackend):
                 v_scale=layer.v_scale_float,
             )
             o = self._apply_sinks_scaling(o, lse, sinks, layer.tp_q_head_num)
+        else:
+            decode_wrapper._pos_encoding_mode = "NONE"
+            decode_wrapper._logits_soft_cap = layer.logit_cap
+            decode_wrapper._sm_scale = layer.scaling
+            decode_wrapper._rope_scale = None
+            decode_wrapper._rope_theta = None
+
+            window_left = getattr(decode_wrapper, "_window_left", -1)
+            o = decode_wrapper.run(
+                q_reshaped,
+                kv_buffer,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
+                window_left=window_left,
+                sinks=sinks,
+            )
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
 
