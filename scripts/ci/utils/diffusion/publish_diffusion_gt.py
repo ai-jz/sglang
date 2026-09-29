@@ -63,6 +63,10 @@ RANDOM_NOISE_LOW_FREQUENCY_THRESHOLD = 0.20
 RANDOM_NOISE_BLUR_RESIDUAL_THRESHOLD = 0.045
 OLD_NEW_MIN_SSIM = 0.20
 OLD_NEW_MAX_MEAN_ABS_DIFF = 45.0
+# Night scenes by prompt, which every output fails the low-detail heuristic on,
+# including the reviewed GT; the noise and old/new drift checks still apply.
+LOW_DETAIL_EXEMPT_CASES = frozenset({"minimax_h3_ref2va_video_audio_2gpu_h100"})
+LOW_DETAIL_REASON = "low-contrast low-detail output"
 
 
 @dataclass(frozen=True)
@@ -239,9 +243,21 @@ def get_quality_failure_reasons(metrics):
         and metrics.blur_residual > RANDOM_NOISE_BLUR_RESIDUAL_THRESHOLD
     )
     if low_detail_static:
-        reasons.append("low-contrast low-detail output")
+        reasons.append(LOW_DETAIL_REASON)
     if high_frequency_noise:
         reasons.append("high-frequency random noise")
+    return reasons
+
+
+def _is_low_detail_exempt(path):
+    name = os.path.basename(path)
+    return any(name.startswith(f"{case}_") for case in LOW_DETAIL_EXEMPT_CASES)
+
+
+def _gate_failure_reasons(path, metrics):
+    reasons = get_quality_failure_reasons(metrics)
+    if _is_low_detail_exempt(path):
+        reasons = [reason for reason in reasons if reason != LOW_DETAIL_REASON]
     return reasons
 
 
@@ -302,7 +318,7 @@ def validate_gt_files(files_to_upload, changed_files, remote_image_entries, toke
     failures = []
     for path, content in files_to_upload:
         quality_metrics = compute_image_quality_metrics(content)
-        quality_reasons = get_quality_failure_reasons(quality_metrics)
+        quality_reasons = _gate_failure_reasons(path, quality_metrics)
         if quality_reasons:
             failures.append(
                 f"{path}: {', '.join(quality_reasons)} "
@@ -318,7 +334,7 @@ def validate_gt_files(files_to_upload, changed_files, remote_image_entries, toke
             REPO_OWNER, REPO_NAME, remote_entry["sha"], token
         )
         old_quality_metrics = compute_image_quality_metrics(old_content)
-        old_quality_reasons = get_quality_failure_reasons(old_quality_metrics)
+        old_quality_reasons = _gate_failure_reasons(path, old_quality_metrics)
         if old_quality_reasons:
             print(
                 f"Skipping old/new drift check for {path} because existing GT is "
