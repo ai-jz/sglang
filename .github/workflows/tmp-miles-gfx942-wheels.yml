@@ -1,0 +1,127 @@
+# TEMPORARY: builds the gfx942 (MI300X) wheels shelf for the miles rocm10-mi30x image
+# on MI300 runners (apex needs the GPU at build time for its wavefront size), then
+# GPU-validates them in a fresh container. Lives only on branch tmp/miles-gfx942-wheels.
+name: TMP Miles gfx942 wheels
+
+on:
+  push:
+    branches: [tmp/miles-gfx942-wheels]
+
+env:
+  BASE_IMAGE: rocm/sgl-dev:v0.5.20-rocm10-mi30x-20260919
+
+jobs:
+  build:
+    if: github.repository == 'sgl-project/sglang'
+    runs-on: linux-mi300-1gpu-sglang
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [apex, te, flash-attn]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout wheels recipes
+        uses: actions/checkout@v4
+        with:
+          repository: XinyuJiangCMU/miles-wheels-rocm
+          path: miles-wheels-rocm
+          persist-credentials: false
+
+      - name: Ensure VRAM is clear
+        run: bash scripts/ci/amd/ensure_vram_clear.sh rocm
+
+      - name: Start base container
+        run: |
+          bash scripts/ci/amd/amd_ci_start_container.sh --custom-image "${BASE_IMAGE}"
+          mkdir -p out/${{ matrix.component }}
+          docker inspect --format '{{index .RepoDigests 0}}' "${BASE_IMAGE}" | tee out/${{ matrix.component }}/base-image-digest.txt
+          git -C miles-wheels-rocm rev-parse HEAD | tee out/${{ matrix.component }}/recipes-commit.txt
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Install build prerequisites
+        run: |
+          docker exec ci_sglang bash -c '
+            set -ex
+            apt-get update
+            apt-get install -y build-essential git ninja-build cmake xxd
+            pip install setuptools wheel packaging ninja cxxfilt==0.3.0 py-cpuinfo==9.0.0
+            rocminfo | grep -m1 -E "gfx9[0-9]+"
+            python -c "import torch; print(torch.__version__, torch.version.hip, torch.cuda.get_device_properties(0).gcnArchName)"
+          '
+
+      - name: Build ${{ matrix.component }} wheel
+        run: |
+          case "${{ matrix.component }}" in
+            apex)
+              cmd='python build_apex_wheel.py --gpu-arch gfx942 --out /sglang-checkout/out/apex --jobs 64' ;;
+            te)
+              cmd='python -c "import build_te_wheel as b; cfg = b.BuildConfig(); cfg.env.update({k: \"gfx942\" for k in (\"GPU_ARCH\", \"PYTORCH_ROCM_ARCH\", \"GPU_ARCH_LIST\", \"AMDGPU_TARGET\", \"NVTE_ROCM_ARCH\")}); b.build(cfg, \"/sglang-checkout/out/te\")"' ;;
+            flash-attn)
+              cmd='GPU_ARCHS=gfx942 BUILD_TARGET=rocm FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=64 pip wheel flash-attn==2.8.3 --no-deps --no-build-isolation -w /sglang-checkout/out/flash-attn -v' ;;
+          esac
+          docker exec -w /sglang-checkout/miles-wheels-rocm ci_sglang bash -c "set -o pipefail; ${cmd} 2>&1 | tee /sglang-checkout/out/${{ matrix.component }}/build.log"
+          cd out/${{ matrix.component }} && sha256sum *.whl | tee sha256sums.txt
+
+      - name: Upload ${{ matrix.component }} wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gfx942-${{ matrix.component }}
+          path: out/${{ matrix.component }}
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker exec ci_sglang chown -R "$(id -u):$(id -g)" /sglang-checkout || true
+          docker rm -f ci_sglang || true
+
+  validate:
+    needs: build
+    if: github.repository == 'sgl-project/sglang'
+    runs-on: linux-mi300-1gpu-sglang
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gfx942-*
+          path: out
+
+      - name: Ensure VRAM is clear
+        run: bash scripts/ci/amd/ensure_vram_clear.sh rocm
+
+      - name: Start fresh base container
+        run: bash scripts/ci/amd/amd_ci_start_container.sh --custom-image "${BASE_IMAGE}"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Install wheels the way miles docker/Dockerfile.rocm does
+        run: |
+          docker exec -w /sglang-checkout/out ci_sglang bash -c '
+            set -ex
+            ls -la */
+            pip uninstall -y transformer-engine transformer_engine transformer_engine_torch || true
+            pip install --no-deps --force-reinstall gfx942-te/transformer_engine-*.whl
+            pip install --no-deps --force-reinstall gfx942-flash-attn/flash_attn-*.whl
+            pip install --no-deps --force-reinstall gfx942-apex/apex-*.whl
+            pip list 2>/dev/null | grep -iE "^(apex|flash.attn|transformer.engine)"
+          '
+
+      - name: GPU validation
+        run: |
+          docker exec -w /tmp ci_sglang env GPU_ARCHS=gfx942 \
+            python /sglang-checkout/scripts/ci/amd/tmp_miles_gfx942_wheels/validate.py
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker exec ci_sglang chown -R "$(id -u):$(id -g)" /sglang-checkout || true
+          docker rm -f ci_sglang || true
