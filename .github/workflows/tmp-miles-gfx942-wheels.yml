@@ -9,6 +9,12 @@ on:
 
 env:
   BASE_IMAGE: rocm/sgl-dev:v0.5.20-rocm10-mi30x-20260919
+  # Run whose te / flash-attn artifacts are reused, so only apex is rebuilt here.
+  PRIOR_RUN_ID: "36521001048"
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   build:
@@ -18,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [apex, te, flash-attn]
+        component: [apex]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -49,7 +55,10 @@ jobs:
             apt-get update
             apt-get install -y build-essential git ninja-build cmake xxd
             pip install setuptools wheel packaging ninja cxxfilt==0.3.0 py-cpuinfo==9.0.0
-            rocminfo | grep -m1 -E "gfx9[0-9]+"
+            rocminfo | grep -E "^\*+$|Agent [0-9]|^  Name:|Device Type|Wavefront Size|amdhsa--"
+            # The exact probes apex's op_builder runs for arch and ROCM_WAVEFRONT_SIZE:
+            echo "apex arch: $(/opt/rocm/bin/rocminfo | grep -o -m 1 "gfx.*")"
+            echo "apex wavefront: $(/opt/rocm/bin/rocminfo | grep -Eo -m1 "Wavefront Size:[[:space:]]+[0-9]+" | grep -Eo "[0-9]+")"
             python -c "import torch; print(torch.__version__, torch.version.hip, torch.cuda.get_device_properties(0).gcnArchName)"
           '
 
@@ -57,6 +66,8 @@ jobs:
         run: |
           case "${{ matrix.component }}" in
             apex)
+              python3 scripts/ci/amd/tmp_miles_gfx942_wheels/patch_apex_recipe.py miles-wheels-rocm/build_apex_wheel.py
+              git -C miles-wheels-rocm diff | tee out/apex/recipe.patch
               cmd='python build_apex_wheel.py --gpu-arch gfx942 --out /sglang-checkout/out/apex --jobs 64' ;;
             te)
               cmd='python -c "import build_te_wheel as b; cfg = b.BuildConfig(); cfg.env.update({k: \"gfx942\" for k in (\"GPU_ARCH\", \"PYTORCH_ROCM_ARCH\", \"GPU_ARCH_LIST\", \"AMDGPU_TARGET\", \"NVTE_ROCM_ARCH\")}); b.build(cfg, \"/sglang-checkout/out/te\")"' ;;
@@ -89,11 +100,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download wheels
+      - name: Download apex wheel
         uses: actions/download-artifact@v4
         with:
           pattern: gfx942-*
           path: out
+
+      - name: Download te and flash-attn wheels from the prior run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gfx942-{te,flash-attn}
+          path: out
+          run-id: ${{ env.PRIOR_RUN_ID }}
+          github-token: ${{ github.token }}
 
       - name: Ensure VRAM is clear
         run: bash scripts/ci/amd/ensure_vram_clear.sh rocm
