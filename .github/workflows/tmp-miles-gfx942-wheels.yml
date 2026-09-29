@@ -56,7 +56,7 @@ jobs:
             apt-get install -y build-essential git ninja-build cmake xxd
             pip install setuptools wheel packaging ninja cxxfilt==0.3.0 py-cpuinfo==9.0.0
             rocminfo | grep -E "^\*+$|Agent [0-9]|^  Name:|Device Type|Wavefront Size|amdhsa--"
-            # The exact probes apex's op_builder runs for arch and ROCM_WAVEFRONT_SIZE:
+            # The exact probes the apex op_builder runs for arch and ROCM_WAVEFRONT_SIZE:
             echo "apex arch: $(/opt/rocm/bin/rocminfo | grep -o -m 1 "gfx.*")"
             echo "apex wavefront: $(/opt/rocm/bin/rocminfo | grep -Eo -m1 "Wavefront Size:[[:space:]]+[0-9]+" | grep -Eo "[0-9]+")"
             python -c "import torch; print(torch.__version__, torch.version.hip, torch.cuda.get_device_properties(0).gcnArchName)"
