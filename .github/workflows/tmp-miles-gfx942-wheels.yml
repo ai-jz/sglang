@@ -9,8 +9,9 @@ on:
 
 env:
   BASE_IMAGE: rocm/sgl-dev:v0.5.20-rocm10-mi30x-20260919
-  # Run whose te / flash-attn artifacts are reused, so only apex is rebuilt here.
-  PRIOR_RUN_ID: "36521001048"
+  # Runs whose artifacts are validated; the build job is off while re-validating.
+  PRIOR_RUN_ID: "36521001048"   # te, flash-attn
+  APEX_RUN_ID: "36522991554"    # apex
 
 permissions:
   contents: read
@@ -18,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    if: github.repository == 'sgl-project/sglang'
+    if: false
     runs-on: linux-mi300-1gpu-sglang
     timeout-minutes: 330
     strategy:
@@ -93,7 +94,7 @@ jobs:
 
   validate:
     needs: build
-    if: github.repository == 'sgl-project/sglang'
+    if: ${{ !failure() && !cancelled() && github.repository == 'sgl-project/sglang' }}
     runs-on: linux-mi300-1gpu-sglang
     timeout-minutes: 60
     steps:
@@ -103,8 +104,10 @@ jobs:
       - name: Download apex wheel
         uses: actions/download-artifact@v4
         with:
-          pattern: gfx942-*
+          pattern: gfx942-apex
           path: out
+          run-id: ${{ env.APEX_RUN_ID }}
+          github-token: ${{ github.token }}
 
       - name: Download te and flash-attn wheels from the prior run
         uses: actions/download-artifact@v4
