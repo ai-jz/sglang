@@ -647,8 +647,7 @@ mod tests {
             url: "http://x".into(),
             mode: WorkerMode::Plain,
             model_ids: vec![ModelId("m".into())],
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         let cb = cb_config_for_spec(&spec, &cfg).expect("model has cb config");
         assert_eq!(cb.threshold.get(), 5);
@@ -763,8 +762,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
 
@@ -808,8 +806,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
 
@@ -858,8 +855,7 @@ mod tests {
                 url,
                 mode: WorkerMode::Plain,
                 model_ids: Vec::new(),
-                bootstrap_port: None,
-                version_group: None,
+                ..Default::default()
             };
             tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
             let registered = tokio::time::timeout(Duration::from_secs(2), async {
@@ -929,8 +925,7 @@ mod tests {
             url: worker_url.clone(),
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
         // Wait until the manager has both registered the worker AND
@@ -1031,8 +1026,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
         // Wait for the manager to land the registry write so the
@@ -1112,8 +1106,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec.clone())).await.unwrap();
 
@@ -1231,8 +1224,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -1353,8 +1345,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         };
         tx.send(DiscoveryEvent::Added(spec)).await.unwrap();
 
@@ -1443,8 +1434,7 @@ mod tests {
             url: worker_url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -1568,8 +1558,7 @@ mod tests {
             url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -1696,8 +1685,7 @@ mod tests {
             url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -1768,8 +1756,7 @@ mod tests {
             url,
             mode: WorkerMode::Plain,
             model_ids: Vec::new(),
-            bootstrap_port: None,
-            version_group: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
