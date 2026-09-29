@@ -104,7 +104,8 @@ class Parallel(msgspec.Struct):
             help="The attention data parallelism size: the number of "
             "data-parallel attention groups inside the TP group, while the FFN "
             "stays tensor parallel. Replaces --enable-dp-attention. Without "
-            "--dp-size, --dp-size defaults to this value. Defaults to 1.",
+            "--dp-size, --dp-size defaults to this value. 1 turns attention "
+            "data parallelism off.",
             aliases=["--attention-data-parallel-size"],
             resolvable=True,
         ),

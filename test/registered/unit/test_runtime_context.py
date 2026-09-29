@@ -2245,7 +2245,7 @@ class TestTheDerivedHalfIsDeclared(CustomTestCase):
 
     def test_the_arithmetic_produces_nothing_that_is_not_declared(self):
         # attn_dp_size is a configured parallel field; the rest are derived.
-        from sglang.srt.runtime_context import _parallel_fields
+        from sglang.srt.runtime_context import _derived_widths
 
         produced = set(
             derive_parallel_widths(
@@ -2258,7 +2258,7 @@ class TestTheDerivedHalfIsDeclared(CustomTestCase):
                 dcp_enabled=False,
             )
         )
-        self.assertEqual(produced - _parallel_fields(), set())
+        self.assertEqual(produced - set(_derived_widths()), {"attn_dp_size"})
 
     def test_a_declared_quotient_is_not_a_record_field(self):
         """It has no operator input to preserve, and the record is what crosses

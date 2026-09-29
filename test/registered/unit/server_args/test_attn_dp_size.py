@@ -1,6 +1,7 @@
 """--attn-dp-size gives the attention data-parallel width directly; the
 deprecated --enable-dp-attention spelling resolves to the same configuration."""
 
+import argparse
 import json
 import logging
 import os
@@ -8,10 +9,12 @@ import shutil
 import tempfile
 import unittest
 
-from sglang.srt.arg_groups.overrides import resolution_result
+from sglang.srt.arg_groups.overrides import resolution_result, resolving_view
+from sglang.srt.arg_groups.parallel_hook import handle_attn_dp_size
+from sglang.srt.runtime_context import get_context, get_parallel
 from sglang.srt.server_args import ServerArgs
 from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
+from sglang.test.test_utils import CustomTestCase, published_topology
 
 register_cpu_ci(est_time=20, suite="base-a-test-cpu")
 
@@ -66,6 +69,23 @@ class TestAttnDpSize(CustomTestCase):
                 self.assertEqual(self.field(new, "attn_dp_size"), dp_size)
                 self.assertTrue(self.field(new, "enable_dp_attention"))
 
+    def test_the_new_spelling_does_not_warn(self):
+        logger = logging.getLogger("sglang.srt.arg_groups.parallel_hook")
+        with self.assertLogs(logger, "WARNING") as logs:
+            logger.warning("sentinel")
+            self.resolve(tp_size=2, attn_dp_size=2)
+        self.assertEqual(
+            [line for line in logs.output if "--enable-dp-attention" in line], []
+        )
+
+    def test_both_cli_spellings_parse(self):
+        parser = argparse.ArgumentParser()
+        ServerArgs.add_cli_args(parser)
+        for flag in ("--attn-dp-size", "--attention-data-parallel-size"):
+            with self.subTest(flag=flag):
+                raw = parser.parse_args(["--model-path", self.path, flag, "2"])
+                self.assertEqual(ServerArgs.from_cli_args(raw).attn_dp_size, 2)
+
     def test_the_deprecated_spelling_warns_with_its_replacement(self):
         with self.assertLogs("sglang.srt.arg_groups.parallel_hook", "WARNING") as logs:
             self.resolve(tp_size=2, dp_size=2, enable_dp_attention=True)
@@ -109,6 +129,45 @@ class TestAttnDpSize(CustomTestCase):
             with self.subTest(**fields):
                 with self.assertRaises(ValueError):
                     self.resolve(**fields)
+
+    def test_dwdp_rejects_a_different_attention_dp_width(self):
+        with self.assertRaisesRegex(AssertionError, "--attn-dp-size 2 contradicts"):
+            self.resolve(tp_size=4, dwdp_size=4, attn_dp_size=2)
+
+    def test_a_scale_joiner_keeps_dp_attention_at_width_one(self):
+        server_args = ServerArgs(
+            model_path="dummy", attn_dp_size=1, ep_join_mode="scale"
+        )
+        handle_attn_dp_size(server_args)
+        view = resolving_view(server_args)
+        self.assertEqual(view.dp_size, 1)
+        self.assertTrue(view.enable_dp_attention)
+
+
+class TestPublishedAttnDpSize(CustomTestCase):
+    """The published width follows the layout, however the config states it."""
+
+    def test_a_published_dummy_config_states_the_width(self):
+        with published_topology(tp_size=4, attn_dp_size=2):
+            parallel = get_parallel()
+            self.assertEqual(parallel.attn_dp_size, 2)
+            self.assertEqual(parallel.dp_size, 2)
+            self.assertEqual(parallel.attn_tp_size, 2)
+            self.assertTrue(parallel.enable_dp_attention)
+
+    def test_an_overridden_layout_is_resolved_like_the_cli(self):
+        for fields, width in (
+            ({"tp_size": 4, "attn_dp_size": 4}, 4),
+            ({"tp_size": 4, "dp_size": 2, "enable_dp_attention": True}, 2),
+            ({"tp_size": 4, "dp_size": 2, "attn_dp_size": 1}, 1),
+        ):
+            with self.subTest(**fields):
+                with get_context().override_server_args(**fields) as server_args:
+                    self.assertEqual(get_parallel().attn_dp_size, width)
+                    self.assertEqual(get_parallel().enable_dp_attention, width > 1)
+                    self.assertEqual(
+                        resolution_result(server_args, "attn_dp_size"), width
+                    )
 
 
 if __name__ == "__main__":

@@ -1177,6 +1177,26 @@ class RuntimeContext:
         return _ServerArgsOverride(self, fields)
 
 
+def _resolve_declared_dp_layout(server_args: Any, declared: dict) -> None:
+    """Resolve an overridden DP layout the way resolution would have.
+
+    Resolution already ran on the dummy config, so turn an ``attn_dp_size``
+    override into the ``dp_size`` / ``enable_dp_attention`` layout it stands
+    for, and record the width of whatever layout the overrides leave, so the
+    returned ``ServerArgs`` and the published bag agree.
+    """
+    from sglang.srt.arg_groups.overrides import run_post_process_pass
+    from sglang.srt.arg_groups.parallel_hook import (
+        handle_attn_dp_size,
+        resolve_attn_dp_size,
+    )
+
+    if "attn_dp_size" in declared:
+        handle_attn_dp_size(server_args)
+    if declared.keys() & {"attn_dp_size", "dp_size", "enable_dp_attention"}:
+        run_post_process_pass(server_args, resolve_attn_dp_size)
+
+
 class _ServerArgsOverride:
     """Scoped config override (see ``RuntimeContext.override_server_args``).
 
@@ -1237,6 +1257,7 @@ class _ServerArgsOverride:
         declared = {n: v for n, v in self._fields.items() if n in fields}
         if declared:
             declare_resolution(server_args, "override_server_args", **declared)
+            _resolve_declared_dp_layout(server_args, declared)
         seeds = {n: v for n, v in self._fields.items() if n not in fields}
         for name, value in seeds.items():
             msgspec.Struct.__setattr__(server_args, name, value)

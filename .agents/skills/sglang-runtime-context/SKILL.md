@@ -253,10 +253,12 @@ A process-global seed field-read of one of these sizes
 (`get_server_args().tp_size`, or an alias of it) is a read-ratchet failure. A
 `server_args` the object was *handed* is a different thing and not a ratchet
 matter — see "Reads that legitimately stay on a ServerArgs instance".
-Fail-loud is narrower: before dist init, a live *rank/group* read raises. The six
-parallel quotients are not live reads at all — `attn_tp_size`, `attn_dp_size`,
+Fail-loud is narrower: before dist init, a live *rank/group* read raises. The
+parallel widths are not live reads at all — the five quotients `attn_tp_size`,
 `attn_dcp_size`, `moe_ep_size`, `moe_tp_size`, `dcp_enabled` are a function of the
-configured leaves, computed once at publish into bag leaves, and answered
+configured leaves, computed once at publish into bag leaves; `attn_dp_size` is a
+configured field that publication recomputes from the `dp_size` /
+`enable_dp_attention` layout it resolves to. All are answered
 override → stamp → published leaf. So `dcp_enabled` means "the launch configured
 DCP" (`dcp_size > 1`), not "a DCP group is installed here"; in a scheduler the
 stamp makes the two identical, in a process that publishes without dist init they

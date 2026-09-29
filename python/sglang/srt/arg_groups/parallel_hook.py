@@ -23,7 +23,7 @@ from sglang.srt.arg_groups.resolution_hooks import run_hook
 from sglang.srt.connector import ConnectorType
 from sglang.srt.environ import envs
 from sglang.srt.model_executor.cuda_graph_config import Backend, Phase, with_phase
-from sglang.srt.runtime_context import get_platform
+from sglang.srt.runtime_context import attn_dp_size_of, get_platform
 from sglang.srt.utils.common import parse_connector_type
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ def handle_attn_dp_size(server_args: Any):
 
     Runs before any handler reads dp_size or enable_dp_attention. With N > 1,
     DP attention runs N attention data-parallel groups inside the TP group, one
-    scheduler each, so dp_size becomes N. An elastic EP scale joiner runs DP
-    attention at a local width of one.
+    scheduler each, so dp_size becomes N. An elastic EP scale joiner that passes
+    --attn-dp-size 1 still runs DP attention, at a local width of one.
     """
     cfg = resolving_view(server_args)
     size = cfg.attn_dp_size
@@ -69,9 +69,8 @@ def handle_attn_dp_size(server_args: Any):
 
 
 def resolve_attn_dp_size(view: Any) -> dict:
-    """The published attention data-parallel width, from the final layout: the
-    DP-attention groups when DP attention is on, otherwise one."""
-    return {"attn_dp_size": view.dp_size if view.enable_dp_attention else 1}
+    """Record the attention data-parallel width of the final layout."""
+    return {"attn_dp_size": attn_dp_size_of(view)}
 
 
 def _boundary_parallelism_overrides(cfg, model_type: str) -> dict:
@@ -400,6 +399,11 @@ def handle_dwdp(server_args: Any):
     assert cfg.pp_size == 1, "DWDP requires pp_size == 1"
     assert not cfg.enable_two_batch_overlap, (
         "DWDP's prefetch event protocol does not support two-batch overlap"
+    )
+
+    assert cfg.attn_dp_size in (None, cfg.dwdp_size), (
+        f"DWDP runs attention data parallelism at dwdp_size ({cfg.dwdp_size}), "
+        f"which --attn-dp-size {cfg.attn_dp_size} contradicts"
     )
 
     if cfg.disaggregation_mode == "null":

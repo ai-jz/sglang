@@ -662,8 +662,8 @@ Please consult the documentation below and [server_args.py](https://github.com/s
     </tr>
         <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--attention-data-parallel-size`<br/>`--attn-dp-size`</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>The attention data parallelism size: the number of data-parallel attention groups inside the TP group, while the FFN stays tensor parallel. Replaces `--enable-dp-attention`. Without `--dp-size`, `--dp-size` defaults to this value.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`1`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>The attention data parallelism size: the number of data-parallel attention groups inside the TP group, while the FFN stays tensor parallel. Replaces `--enable-dp-attention`. Without `--dp-size`, `--dp-size` defaults to this value. `1` turns attention data parallelism off.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`None`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: int</td>
     </tr>
         <tr>
