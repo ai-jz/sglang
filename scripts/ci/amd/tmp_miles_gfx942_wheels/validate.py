@@ -42,7 +42,7 @@ def apex_ops():
         wgrad = importlib.import_module("fused_weight_gradient_mlp_cuda")
     except ImportError:
         wgrad = importlib.import_module("apex.fused_weight_gradient_mlp_cuda")
-    print(f"fused_weight_gradient_mlp_cuda from {wgrad.__file__}")
+    print(f"fused_weight_gradient_mlp_cuda: {wgrad}")
     x = torch.randn(512, 1024, device=DEV, dtype=torch.bfloat16)
     g = torch.randn(512, 768, device=DEV, dtype=torch.bfloat16)
     main_grad = torch.randn(768, 1024, device=DEV, dtype=torch.float32)

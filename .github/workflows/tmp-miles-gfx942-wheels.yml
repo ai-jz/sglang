@@ -131,6 +131,7 @@ jobs:
             pip install --no-deps --force-reinstall gfx942-te/transformer_engine-*.whl
             pip install --no-deps --force-reinstall gfx942-flash-attn/flash_attn-*.whl
             pip install --no-deps --force-reinstall gfx942-apex/apex-*.whl
+            pip install onnxscript  # miles requirements.txt: import-time dependency of TE
             pip list 2>/dev/null | grep -iE "^(apex|flash.attn|transformer.engine)"
           '
 
